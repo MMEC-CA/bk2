@@ -389,16 +389,6 @@
       
       c.velocity = Math.max(0, Math.min(MAX_SPEED * 0.8, c.velocity));  // AI doesn't brake
     }
-      }
-      if (m.aiTarget) {
-        var dx = m.aiTarget.x - m.x;
-        var dy = m.aiTarget.y - m.y;
-        var dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-        var strength = 1600;
-        m.vx += (dx / dist) * strength * dt;
-        m.vy += (dy / dist) * strength * dt;
-      }
-    }
 
     function resolveCarCollisions() {
       for (var i = 0; i < gameCars.length; i++) {
