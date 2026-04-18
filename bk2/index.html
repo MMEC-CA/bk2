@@ -287,8 +287,10 @@
       if (this.trackPosition >= TRACK_TOTAL_LENGTH) {
         this.trackPosition -= TRACK_TOTAL_LENGTH;
         this.lapsCompleted++;
+        console.log('Car ' + this.peerId + ' completed lap ' + this.lapsCompleted);
         if (this.lapsCompleted >= LAPS_TO_WIN) {
           this.isFinished = true;
+          console.log('Car ' + this.peerId + ' finished the race!');
           playTone(880, 0.2, 0.3);
         }
       }
@@ -314,6 +316,7 @@
         if (distFromCenter > 0) {
           // Outside (off the track) - car is eliminated
           this.alive = false;
+          console.log('Car ' + this.peerId + ' eliminated (off track)');
           playTone(100, 0.1, 0.3);
         } else {
           // Inside wall - bounce back
@@ -332,6 +335,7 @@
           this.velocity *= 0.7;
           this.spinVelocity += (Math.random() - 0.5) * 4;
           
+          console.log('Car ' + this.peerId + ' hit inside wall');
           playTone(200, 0.1, 0.2);
         }
       }
@@ -448,6 +452,8 @@
           
           // Check for overlap
           if (aRight > bLeft && aLeft < bRight && aBottom > bTop && aTop < bBottom) {
+            console.log('Car ' + a.peerId + ' collided with ' + b.peerId);
+            
             // Calculate collision normal (simplified - use vector between centers)
             var dx = b.x - a.x;
             var dy = b.y - a.y;
