@@ -721,6 +721,11 @@
       ctx.textAlign = 'center';
       ctx.fillText('CAR CAR', GW / 2, Math.max(60, GH * 0.07));
       
+      // Version
+      ctx.font = 'bold ' + Math.max(10, Math.min(14, GW / 160)) + 'px monospace';
+      ctx.fillStyle = '#666';
+      ctx.fillText(BUILD, GW / 2, Math.max(85, GH * 0.11));
+      
       // Level chooser
       ctx.font = 'bold ' + Math.max(18, Math.min(32, GW / 60)) + 'px monospace';
       ctx.fillStyle = selectedLevel > 1 ? '#fff' : '#444';
@@ -1327,13 +1332,6 @@
       canvas.height = window.innerHeight;
       GW = canvas.width;
       GH = canvas.height;
-      TABLE_WIDTH = Math.max(TABLE_MIN_WIDTH, Math.min(TABLE_MAX_WIDTH, GW - 120));
-      TABLE_HEIGHT = Math.max(TABLE_MIN_HEIGHT, Math.min(TABLE_MAX_HEIGHT, GH - 180));
-      TABLE_LEFT = (GW - TABLE_WIDTH) / 2;
-      TABLE_TOP = (GH - TABLE_HEIGHT) / 2;
-      TABLE_CENTER_X = GW * 0.5;
-      TABLE_CENTER_Y = GH * 0.5;
-      TABLE_RADIUS = Math.min(TABLE_WIDTH, TABLE_HEIGHT) * 0.45;
     }
 
     function gameLoop(now) {
