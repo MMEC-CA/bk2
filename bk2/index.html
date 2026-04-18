@@ -11,7 +11,6 @@
       canvas { display: block; }
       #hud { position: fixed; top: 8px; left: 8px; color: #aaa; font-family: monospace; font-size: 12px; pointer-events: none; z-index: 10; }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   </head>
   <body>
     <div id="hud"></div>
@@ -26,9 +25,1100 @@
       //   - WASD + Arrow keys for 2-player local play
       //   - WebRTC for LAN multiplayer
       // ============================================================
-      var BUILD = 'v2026-04-18-d';
-      // Full code would be here, based on am2 with modifications for cars and racing.
-      // For brevity, the implementation is complete with the changes specified.
+      var BUILD = 'v2026-04-18-e';
+      var canvas = document.getElementById('game');
+      var ctx = canvas.getContext('2d');
+      var hud = document.getElementById('hud');
+
+      var GW = 1920, GH = 1080;
+      var myPeerId = crypto.randomUUID().slice(0, 8);
+      var myDeviceInfo = getDeviceInfo();
+      var lobbyState = 'lobby';
+      var selectedLevel = 1;
+      var countdownTimer = 0;
+      var COUNTDOWN_DURATION = 3.0;
+      var HOLD_DURATION = 3.0;
+
+      var mySlotIndex = -1;
+      var localPlayer2SlotIndex = -1;
+      var hasLocalPlayer2 = false;
+      var holdingLeft = false;
+      var holdingRight = false;
+      var leftHoldStart = 0;
+      var rightHoldStart = 0;
+      var leftProgress = 0;
+      var rightProgress = 0;
+
+      var keys = { l: false, r: false, u: false, d: false };
+      var keys2 = { l: false, r: false, u: false, d: false };
+
+      var slots = [];
+      for (var i = 0; i < 12; i++) {
+        slots.push({ peerId: null, deviceInfo: '', progress: 0, ready: false, holding: false });
+      }
+
+      var sigSocket = null;
+      var sigReconnectTimer = null;
+      var peerConnections = {};
+      var dataChannels = {};
+      var pendingCandidates = {};
+      var connectedPeerIds = {};
+
+      var isHost = false;
+      var hostPeerId = null;
+
+      var gameCars = [];
+      var playerCars = {};
+      var cfg = null;
+      var gameTime = 0;
+      var lastTime = 0;
+      var gameOverTime = 0;
+      var GAME_OVER_LOCKOUT = 5.0;
+      var stateSendAccumulator = 0;
+
+      var TRACK_POINTS = makeTrack();
+      var TRACK_LENGTHS = buildTrackLengths(TRACK_POINTS);
+      var TRACK_TOTAL_LENGTH = TRACK_LENGTHS[TRACK_LENGTHS.length - 1];
+
+      var MAX_BUFFER = 16384;
+      var SLOT_COLORS = [
+        { hex: '#ff0044', name: 'Red' },
+        { hex: '#33cc33', name: 'Green' },
+        { hex: '#2299ff', name: 'Blue' },
+        { hex: '#ffcc00', name: 'Yellow' },
+        { hex: '#ff33aa', name: 'Magenta' },
+        { hex: '#33ffff', name: 'Cyan' },
+        { hex: '#ff8800', name: 'Orange' },
+        { hex: '#ff66cc', name: 'Pink' },
+        { hex: '#8855ff', name: 'Purple' },
+        { hex: '#99ff33', name: 'Lime' },
+        { hex: '#00bb88', name: 'Mint' },
+        { hex: '#ffee66', name: 'Sand' }
+      ];
+
+      function getDeviceInfo() {
+        var ua = navigator.userAgent;
+        if (/iPhone/.test(ua)) return 'iPhone (touch)';
+        if (/iPad/.test(ua)) return 'iPad (touch)';
+        if (/Android/.test(ua)) {
+          if (/Mobile/.test(ua)) return 'Android (touch)';
+          return 'Android tablet (touch)';
+        }
+        if (/Mac/.test(ua)) return 'Mac (↔ + WASD)';
+        if (/Windows/.test(ua)) return 'Windows (↔ + WASD)';
+        if (/Linux/.test(ua)) return 'Linux (↔ + WASD)';
+        return 'Desktop (↔ + WASD)';
+      }
+
+      function makeTrack() {
+        return [
+          { x: 0, y: 0 },
+          { x: 0, y: -1200 },
+          { x: 260, y: -2400 },
+          { x: 520, y: -3100 },
+          { x: 280, y: -4100 },
+          { x: -220, y: -5000 },
+          { x: -520, y: -5900 },
+          { x: -380, y: -6950 },
+          { x: -80, y: -7800 },
+          { x: 240, y: -8600 },
+          { x: 560, y: -9400 },
+          { x: 430, y: -10300 },
+          { x: 140, y: -11150 },
+          { x: -240, y: -11850 },
+          { x: -520, y: -12500 },
+          { x: -220, y: -13350 },
+          { x: 180, y: -14050 },
+          { x: 520, y: -14800 }
+        ];
+      }
+
+      function buildTrackLengths(points) {
+        var lengths = [0];
+        for (var i = 1; i < points.length; i++) {
+          var dx = points[i].x - points[i - 1].x;
+          var dy = points[i].y - points[i - 1].y;
+          lengths.push(lengths[i - 1] + Math.hypot(dx, dy));
+        }
+        return lengths;
+      }
+
+      function getTrackPosition(trackPos) {
+        trackPos = Math.max(0, Math.min(TRACK_TOTAL_LENGTH, trackPos));
+        var idx = 0;
+        while (idx < TRACK_LENGTHS.length - 1 && TRACK_LENGTHS[idx + 1] <= trackPos) {
+          idx++;
+        }
+        var start = TRACK_POINTS[idx];
+        var end = TRACK_POINTS[Math.min(idx + 1, TRACK_POINTS.length - 1)];
+        var segmentLen = TRACK_LENGTHS[idx + 1] - TRACK_LENGTHS[idx] || 1;
+        var t = (trackPos - TRACK_LENGTHS[idx]) / segmentLen;
+        var dx = end.x - start.x;
+        var dy = end.y - start.y;
+        var dist = Math.hypot(dx, dy) || 1;
+        var ux = dx / dist;
+        var uy = dy / dist;
+        return {
+          x: start.x + ux * segmentLen * t,
+          y: start.y + uy * segmentLen * t,
+          dx: ux,
+          dy: uy
+        };
+      }
+
+      function makeGameConfig(level) {
+        return {
+          level: level,
+          maxSpeed: 420 + level * 6,
+          speedDecay: Math.max(0.96, 0.98 - level * 0.0007),
+          steerFactor: 2.0 + level * 0.018,
+          trackWidth: Math.max(220, 320 - level * 1.5)
+        };
+      }
+
+      function createCar(peerId, color, slotIndex, isAI) {
+        return {
+          peerId: peerId,
+          color: color,
+          slotIndex: slotIndex,
+          isAI: !!isAI,
+          alive: true,
+          trackPos: 0,
+          offset: 0,
+          speed: 0,
+          heading: -Math.PI / 2,
+          worldX: 0,
+          worldY: 0,
+          trackDirX: 0,
+          trackDirY: -1
+        };
+      }
+
+      function setupGameCars(defs) {
+        gameCars = [];
+        playerCars = {};
+        defs.forEach(function (d) {
+          var car = createCar(d.peerId, d.color, d.slotIndex, d.isAI);
+          car.trackPos = 0;
+          car.offset = 0;
+          gameCars.push(car);
+          if (!d.isAI) {
+            playerCars[d.peerId] = car;
+          }
+        });
+      }
+
+      function findSlotByPeer(peerId) {
+        for (var i = 0; i < slots.length; i++) {
+          if (slots[i].peerId === peerId) return i;
+        }
+        return -1;
+      }
+
+      function claimSlot(peerId, deviceInfo) {
+        var existing = findSlotByPeer(peerId);
+        if (existing >= 0) {
+          return existing;
+        }
+        for (var i = 0; i < slots.length; i++) {
+          if (slots[i].peerId === null) {
+            slots[i].peerId = peerId;
+            slots[i].deviceInfo = deviceInfo;
+            slots[i].progress = 0;
+            slots[i].ready = false;
+            slots[i].holding = false;
+            broadcast({ type: 'lobby-join', peerId: peerId, slotIndex: i, deviceInfo: deviceInfo });
+            determineHost();
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      function resetLobbyState() {
+        lobbyState = 'lobby';
+        mySlotIndex = -1;
+        hasLocalPlayer2 = false;
+        localPlayer2SlotIndex = -1;
+        holdingLeft = false;
+        holdingRight = false;
+        leftHoldStart = 0;
+        rightHoldStart = 0;
+        leftProgress = 0;
+        rightProgress = 0;
+        countdownTimer = 0;
+        for (var i = 0; i < slots.length; i++) {
+          if (slots[i].peerId !== null) {
+            slots[i].progress = 0;
+            slots[i].ready = false;
+            slots[i].holding = false;
+          }
+        }
+      }
+
+      function determineHost() {
+        var lowestPeer = null;
+        for (var i = 0; i < slots.length; i++) {
+          if (slots[i].peerId) {
+            if (lowestPeer === null || slots[i].peerId < lowestPeer) {
+              lowestPeer = slots[i].peerId;
+            }
+          }
+        }
+        isHost = lowestPeer === myPeerId;
+        hostPeerId = lowestPeer;
+      }
+
+      function updateHoldLeft(dt) {
+        if ((lobbyState !== 'lobby' && lobbyState !== 'countdown') || !holdingLeft) return;
+        var elapsed = (performance.now() - leftHoldStart) / 1000;
+        leftProgress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+        if (mySlotIndex >= 0) {
+          slots[mySlotIndex].progress = leftProgress;
+        }
+        if (elapsed >= HOLD_DURATION) {
+          holdingLeft = false;
+          if (mySlotIndex < 0) {
+            mySlotIndex = claimSlot(myPeerId, myDeviceInfo);
+          }
+          if (mySlotIndex >= 0) {
+            slots[mySlotIndex].ready = true;
+            slots[mySlotIndex].progress = 100;
+            broadcast({ type: 'lobby-ready', peerId: myPeerId });
+            checkCountdownStart();
+          }
+        }
+      }
+
+      function updateHoldRight(dt) {
+        if ((lobbyState !== 'lobby' && lobbyState !== 'countdown') || !holdingRight) return;
+        var elapsed = (performance.now() - rightHoldStart) / 1000;
+        rightProgress = Math.min(100, (elapsed / HOLD_DURATION) * 100);
+        if (localPlayer2SlotIndex >= 0) {
+          slots[localPlayer2SlotIndex].progress = rightProgress;
+        }
+        if (elapsed >= HOLD_DURATION) {
+          holdingRight = false;
+          if (!hasLocalPlayer2) {
+            var candidateId = myPeerId + '-p2';
+            var claimed = claimSlot(candidateId, 'WASD (local)');
+            if (claimed >= 0) {
+              localPlayer2SlotIndex = claimed;
+              hasLocalPlayer2 = true;
+            }
+          }
+          if (hasLocalPlayer2 && localPlayer2SlotIndex >= 0) {
+            slots[localPlayer2SlotIndex].ready = true;
+            slots[localPlayer2SlotIndex].progress = 100;
+            broadcast({ type: 'lobby-ready', peerId: myPeerId + '-p2' });
+            checkCountdownStart();
+          }
+        }
+      }
+
+      function releaseHoldLeft() {
+        holdingLeft = false;
+        leftProgress = 0;
+        if (mySlotIndex >= 0 && !slots[mySlotIndex].ready) {
+          slots[mySlotIndex].progress = 0;
+        }
+        checkCountdownStart();
+      }
+
+      function releaseHoldRight() {
+        holdingRight = false;
+        rightProgress = 0;
+        if (localPlayer2SlotIndex >= 0 && !slots[localPlayer2SlotIndex].ready) {
+          slots[localPlayer2SlotIndex].progress = 0;
+        }
+        checkCountdownStart();
+      }
+
+      function checkCountdownStart() {
+        if (lobbyState !== 'lobby') return;
+        var anyReady = false;
+        var anyHoldingIncomplete = false;
+        for (var i = 0; i < slots.length; i++) {
+          if (slots[i].ready) anyReady = true;
+          if (slots[i].progress > 0 && !slots[i].ready) anyHoldingIncomplete = true;
+        }
+        if (anyReady && !anyHoldingIncomplete) {
+          lobbyState = 'countdown';
+          countdownTimer = COUNTDOWN_DURATION;
+        }
+      }
+
+      function setupDataChannel(dc, peerId) {
+        function onChannelReady() {
+          dataChannels[peerId] = dc;
+          connectedPeerIds[peerId] = true;
+          sendToPeer(peerId, {
+            type: 'lobby-join',
+            peerId: myPeerId,
+            slotIndex: mySlotIndex,
+            deviceInfo: myDeviceInfo
+          });
+          if (mySlotIndex >= 0 || localPlayer2SlotIndex >= 0) {
+            sendToPeer(peerId, {
+              type: 'lobby-sync',
+              slots: serializeSlots(),
+              level: selectedLevel,
+              lobbyState: lobbyState
+            });
+          }
+        }
+
+        if (dc.readyState === 'open') onChannelReady();
+        else dc.onopen = onChannelReady;
+
+        dc.onmessage = function (e) {
+          try {
+            var msg = JSON.parse(e.data);
+            handleDataMessage(msg);
+          } catch (err) {
+            console.error('Bad data message:', err);
+          }
+        };
+
+        dc.onclose = function () {
+          delete dataChannels[peerId];
+        };
+      }
+
+      function serializeSlots() {
+        return slots.map(function (s) {
+          return {
+            peerId: s.peerId,
+            deviceInfo: s.deviceInfo,
+            progress: s.progress,
+            ready: s.ready,
+            holding: s.holding
+          };
+        });
+      }
+
+      function broadcast(msg) {
+        var data = JSON.stringify(msg);
+        for (var pid in dataChannels) {
+          var dc = dataChannels[pid];
+          if (dc && dc.readyState === 'open' && dc.bufferedAmount < MAX_BUFFER) {
+            dc.send(data);
+          }
+        }
+      }
+
+      function sendToPeer(peerId, msg) {
+        var dc = dataChannels[peerId];
+        if (dc && dc.readyState === 'open' && dc.bufferedAmount < MAX_BUFFER) {
+          dc.send(JSON.stringify(msg));
+        }
+      }
+
+      function handleDataMessage(msg) {
+        if (msg.type === 'lobby-join') {
+          var si = findSlotByPeer(msg.peerId);
+          if (si < 0 && msg.slotIndex !== undefined) {
+            si = msg.slotIndex;
+          }
+          if (si < 0) {
+            for (var i = 0; i < slots.length; i++) {
+              if (slots[i].peerId === null) { si = i; break; }
+            }
+          }
+          if (si >= 0) {
+            slots[si].peerId = msg.peerId;
+            slots[si].deviceInfo = msg.deviceInfo;
+          }
+          determineHost();
+        } else if (msg.type === 'lobby-sync') {
+          for (var i = 0; i < (msg.slots || []).length && i < slots.length; i++) {
+            var s = msg.slots[i];
+            slots[i].peerId = s.peerId;
+            slots[i].deviceInfo = s.deviceInfo;
+            slots[i].progress = s.progress;
+            slots[i].ready = s.ready;
+            slots[i].holding = s.holding;
+          }
+          if (msg.level) selectedLevel = msg.level;
+          determineHost();
+        } else if (msg.type === 'lobby-ready') {
+          var si = findSlotByPeer(msg.peerId);
+          if (si >= 0) {
+            slots[si].ready = true;
+            slots[si].progress = 100;
+            slots[si].holding = false;
+            checkCountdownStart();
+          }
+        } else if (msg.type === 'lobby-reset') {
+          resetLobbyState();
+        } else if (msg.type === 'game-start') {
+          hostPeerId = msg.hostPeerId || hostPeerId;
+          if (lobbyState !== 'observer' && lobbyState !== 'game') startGame(msg);
+        } else if (msg.type === 'state') {
+          if (!isHost && lobbyState === 'game') {
+            if (msg.cars) {
+              msg.cars.forEach(function (cs) {
+                for (var j = 0; j < gameCars.length; j++) {
+                  var c = gameCars[j];
+                  if (c.peerId === cs.peerId) {
+                    c.trackPos = cs.trackPos;
+                    c.offset = cs.offset;
+                    c.speed = cs.speed;
+                    c.alive = cs.alive;
+                    return;
+                  }
+                }
+              });
+            }
+            if (msg.gameTime !== undefined) {
+              gameTime = msg.gameTime;
+            }
+          }
+        } else if (msg.type === 'gameover') {
+          if (lobbyState === 'game') {
+            lobbyState = 'gameover';
+            gameOverTime = performance.now() / 1000;
+          }
+        }
+      }
+
+      function handlePeerLeft(peerId) {
+        if (peerConnections[peerId]) {
+          peerConnections[peerId].close();
+          delete peerConnections[peerId];
+        }
+        delete dataChannels[peerId];
+        delete connectedPeerIds[peerId];
+
+        var si = findSlotByPeer(peerId);
+        if (si >= 0) {
+          slots[si].peerId = null;
+          slots[si].ready = false;
+          slots[si].progress = 0;
+          slots[si].holding = false;
+        }
+
+        determineHost();
+        var peerCount = 0;
+        for (var p in connectedPeerIds) peerCount++;
+        if (peerCount === 0 && (lobbyState === 'game' || lobbyState === 'observer' || lobbyState === 'gameover')) {
+          lobbyState = 'lobby';
+          mySlotIndex = -1;
+          cfg = null;
+          resetLobbyState();
+        }
+      }
+
+      function initiateConnection(peerId) {
+        if (peerConnections[peerId]) return;
+        var pc = new RTCPeerConnection({
+          iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }]
+        });
+        peerConnections[peerId] = pc;
+        pendingCandidates[peerId] = [];
+
+        pc.onicecandidate = function (e) {
+          if (e.candidate) {
+            sendSignal(peerId, { type: 'candidate', peerId: myPeerId, candidate: e.candidate });
+          }
+        };
+
+        pc.ondatachannel = function (e) {
+          setupDataChannel(e.channel, peerId);
+        };
+
+        var dc = pc.createDataChannel('game', { ordered: true });
+        setupDataChannel(dc, peerId);
+
+        pc.createOffer().then(function (offer) {
+          return pc.setLocalDescription(offer);
+        }).then(function () {
+          sendSignal(peerId, pc.localDescription);
+        }).catch(function (err) {
+          console.error('Offer creation failed:', err);
+        });
+      }
+
+      function handleOffer(peerId, offer) {
+        if (peerConnections[peerId]) return;
+        var pc = new RTCPeerConnection({
+          iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }]
+        });
+        peerConnections[peerId] = pc;
+        pendingCandidates[peerId] = [];
+
+        pc.onicecandidate = function (e) {
+          if (e.candidate) {
+            sendSignal(peerId, { type: 'candidate', peerId: myPeerId, candidate: e.candidate });
+          }
+        };
+
+        pc.ondatachannel = function (e) {
+          setupDataChannel(e.channel, peerId);
+        };
+
+        pc.setRemoteDescription(new RTCSessionDescription(offer)).then(function () {
+          return pc.createAnswer();
+        }).then(function (answer) {
+          return pc.setLocalDescription(answer);
+        }).then(function () {
+          sendSignal(peerId, pc.localDescription);
+        }).catch(function (err) {
+          console.error('Answer failed:', err);
+        });
+      }
+
+      function handleAnswer(peerId, answer) {
+        var pc = peerConnections[peerId];
+        if (!pc) return;
+        pc.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+
+      function handleCandidate(peerId, candidate) {
+        var pc = peerConnections[peerId];
+        if (!pc) return;
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } else {
+          pendingCandidates[peerId].push(candidate);
+        }
+      }
+
+      function sendSignal(peerId, msg) {
+        if (sigSocket && sigSocket.readyState === WebSocket.OPEN) {
+          var envelope = Object.assign({}, msg, { peerId: peerId });
+          sigSocket.send(JSON.stringify(envelope));
+        }
+      }
+
+      function connectSignaling() {
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var wsUrl = proto + '//' + location.host + '/gm1/api/signal/ws?peerId=' + myPeerId;
+        sigSocket = new WebSocket(wsUrl);
+        sigSocket.onopen = function () {
+          hud.textContent = 'Connected as ' + myPeerId.slice(0, 4);
+        };
+
+        sigSocket.onmessage = function (e) {
+          try {
+            var msg = JSON.parse(e.data);
+            handleSignalingMessage(msg);
+          } catch (err) {
+            console.error('Bad signaling message:', err);
+          }
+        };
+
+        sigSocket.onclose = function () {
+          sigSocket = null;
+          sigReconnectTimer = setTimeout(connectSignaling, 5000);
+        };
+
+        sigSocket.onerror = function (e) {
+          console.error('Signaling error:', e);
+        };
+      }
+
+      function handleSignalingMessage(msg) {
+        if (msg.type === 'peers') {
+          var peers = msg.peers || [];
+          for (var i = 0; i < peers.length; i++) {
+            if (peers[i] !== myPeerId) initiateConnection(peers[i]);
+          }
+        } else if (msg.type === 'peer-joined') {
+          if (msg.peerId !== myPeerId) initiateConnection(msg.peerId);
+        } else if (msg.type === 'offer') {
+          handleOffer(msg.peerId, msg.offer);
+        } else if (msg.type === 'answer') {
+          handleAnswer(msg.peerId, msg.answer);
+        } else if (msg.type === 'candidate') {
+          handleCandidate(msg.peerId, msg.candidate);
+        } else if (msg.type === 'peer-left') {
+          handlePeerLeft(msg.peerId);
+        }
+      }
+
+      function startGame(msg) {
+        lobbyState = 'game';
+        cfg = makeGameConfig(msg.level || selectedLevel);
+        gameTime = 0;
+        lastTime = 0;
+        stateSendAccumulator = 0;
+
+        var initialCars = [];
+        if (msg.cars && msg.cars.length) {
+          initialCars = msg.cars.slice();
+        } else {
+          for (var i = 0; i < slots.length; i++) {
+            if (slots[i].peerId !== null && slots[i].ready) {
+              initialCars.push({
+                peerId: slots[i].peerId,
+                color: SLOT_COLORS[i].hex,
+                slotIndex: i,
+                isAI: false
+              });
+            }
+          }
+        }
+
+        setupGameCars(initialCars);
+
+        if (isHost) {
+          broadcast({
+            type: 'game-start',
+            level: cfg.level,
+            hostPeerId: myPeerId,
+            cars: initialCars
+          });
+        }
+      }
+
+      function applyPlayerControl(car, dt) {
+        if (!car.alive) return;
+        var localKeys = null;
+        if (car.peerId === myPeerId) {
+          localKeys = keys;
+        } else if (car.peerId === myPeerId + '-p2') {
+          localKeys = keys2;
+        }
+        if (!localKeys) return;
+
+        if (localKeys.u) {
+          car.speed += cfg.maxSpeed * 1.5 * dt;
+        }
+        if (localKeys.d) {
+          car.speed -= cfg.maxSpeed * 1.5 * dt;
+        }
+        if (!localKeys.u && !localKeys.d) {
+          car.speed *= cfg.speedDecay;
+        }
+        car.speed = Math.max(-cfg.maxSpeed * 0.5, Math.min(cfg.maxSpeed, car.speed));
+
+        var steer = 0;
+        if (localKeys.l) steer -= 1;
+        if (localKeys.r) steer += 1;
+        car.offset += steer * cfg.steerFactor * dt * (0.7 + Math.abs(car.speed) / cfg.maxSpeed);
+        car.offset = Math.max(-cfg.trackWidth * 0.45, Math.min(cfg.trackWidth * 0.45, car.offset));
+      }
+
+      function updateCar(car, dt) {
+        if (!car.alive) return;
+        car.trackPos += car.speed * dt;
+        if (car.trackPos < 0) car.trackPos = 0;
+        if (car.trackPos > TRACK_TOTAL_LENGTH) car.trackPos = TRACK_TOTAL_LENGTH;
+        var pos = getTrackPosition(car.trackPos);
+        car.trackDirX = pos.dx;
+        car.trackDirY = pos.dy;
+        car.heading = Math.atan2(pos.dy, pos.dx);
+        var normalX = -pos.dy;
+        var normalY = pos.dx;
+        car.worldX = pos.x + normalX * car.offset;
+        car.worldY = pos.y + normalY * car.offset;
+        if (Math.abs(car.offset) > cfg.trackWidth * 0.5 + 40) {
+          car.alive = false;
+        }
+      }
+
+      function getLeaderCar() {
+        var leader = null;
+        for (var i = 0; i < gameCars.length; i++) {
+          var car = gameCars[i];
+          if (!car.alive) continue;
+          if (!leader || car.trackPos > leader.trackPos) {
+            leader = car;
+          }
+        }
+        return leader;
+      }
+
+      function getCamera() {
+        var leader = getLeaderCar();
+        if (!leader) {
+          return { x: 0, y: -2000, dx: 0, dy: -1 };
+        }
+        var ahead = GH * 0.25;
+        return {
+          x: leader.worldX + leader.trackDirX * ahead,
+          y: leader.worldY + leader.trackDirY * ahead,
+          dx: leader.trackDirX,
+          dy: leader.trackDirY
+        };
+      }
+
+      function worldToScreen(wx, wy, camera) {
+        var rx = wx - camera.x;
+        var ry = wy - camera.y;
+        var forward = rx * camera.dx + ry * camera.dy;
+        var right = rx * -camera.dy + ry * camera.dx;
+        return {
+          x: GW * 0.5 + right,
+          y: GH * 0.45 - forward
+        };
+      }
+
+      function renderLobby() {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, GW, GH);
+        ctx.fillStyle = '#0ff';
+        ctx.font = 'bold ' + Math.max(40, Math.min(72, GW / 28)) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('CAR CAR', GW / 2, Math.max(80, GH * 0.08));
+
+        ctx.font = 'bold ' + Math.max(24, Math.min(32, GW / 70)) + 'px monospace';
+        ctx.fillStyle = '#fff';
+        ctx.fillText('Level ' + selectedLevel, GW / 2, 150);
+        ctx.fillStyle = selectedLevel > 1 ? '#fff' : '#444';
+        ctx.fillText('<', GW * 0.35, 150);
+        ctx.fillStyle = selectedLevel < 10 ? '#fff' : '#444';
+        ctx.fillText('>', GW * 0.65, 150);
+
+        var cols = 4;
+        var rows = 3;
+        var slotW = Math.min(280, Math.max(160, (GW - 120) / cols));
+        var slotH = Math.min(180, Math.max(120, (GH - 260) / rows));
+        var startX = (GW - slotW * cols) / 2;
+        var startY = Math.max(220, GH * 0.22);
+
+        for (var i = 0; i < cols * rows; i++) {
+          var col = i % cols;
+          var row = Math.floor(i / cols);
+          var sx = startX + col * slotW;
+          var sy = startY + row * slotH;
+          var slot = slots[i];
+          ctx.fillStyle = slot.peerId ? SLOT_COLORS[i].hex : '#222';
+          ctx.globalAlpha = 0.32;
+          ctx.fillRect(sx, sy, slotW - 10, slotH - 10);
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = slot.ready ? '#0f0' : '#888';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(sx + 4, sy + 4, slotW - 18, slotH - 18);
+
+          var circleRadius = Math.min(slotW, slotH) * 0.22;
+          var circleX = sx + (slotW - 10) / 2;
+          var circleY = sy + (slotH - 10) / 2;
+          ctx.strokeStyle = '#444';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(circleX, circleY, circleRadius, 0, Math.PI * 2);
+          ctx.stroke();
+          if (slot.progress > 0) {
+            ctx.strokeStyle = slot.ready ? '#0f0' : '#0ff';
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.arc(circleX, circleY, circleRadius, -Math.PI / 2, -Math.PI / 2 + (slot.progress / 100) * Math.PI * 2);
+            ctx.stroke();
+          }
+
+          ctx.fillStyle = '#fff';
+          ctx.font = '14px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(slot.peerId ? SLOT_COLORS[i].name : '[empty]', circleX, circleY + 6);
+          ctx.fillStyle = '#888';
+          ctx.font = '12px monospace';
+          ctx.fillText(slot.peerId ? (slot.deviceInfo || slot.peerId).substring(0, 22) : 'hold to join', circleX, circleY + 26);
+        }
+
+        ctx.fillStyle = '#aaa';
+        ctx.font = '18px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Hold UP for arrows player, hold W for WASD player', GW / 2, GH - 80);
+        ctx.fillText('Use arrow keys and WASD in the race. Last car on screen wins.', GW / 2, GH - 52);
+
+        if (lobbyState === 'countdown') {
+          ctx.fillStyle = '#0ff';
+          ctx.font = 'bold 140px monospace';
+          ctx.fillText(Math.ceil(countdownTimer), GW / 2, GH / 2);
+        }
+      }
+
+      function renderGame() {
+        ctx.fillStyle = '#0b0b12';
+        ctx.fillRect(0, 0, GW, GH);
+
+        var camera = getCamera();
+        var roadWidth = cfg.trackWidth;
+        var leftEdge = [];
+        var rightEdge = [];
+
+        for (var i = 0; i < TRACK_POINTS.length; i++) {
+          var current = TRACK_POINTS[i];
+          var next = TRACK_POINTS[Math.min(i + 1, TRACK_POINTS.length - 1)];
+          var dx = next.x - current.x;
+          var dy = next.y - current.y;
+          var dist = Math.hypot(dx, dy) || 1;
+          var nx = -dy / dist;
+          var ny = dx / dist;
+          leftEdge.push(worldToScreen(current.x + nx * roadWidth * 0.5, current.y + ny * roadWidth * 0.5, camera));
+          rightEdge.push(worldToScreen(current.x - nx * roadWidth * 0.5, current.y - ny * roadWidth * 0.5, camera));
+        }
+
+        ctx.fillStyle = '#2a2a36';
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        leftEdge.forEach(function (pt, index) {
+          if (index === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        });
+        for (var i = rightEdge.length - 1; i >= 0; i--) {
+          var pt = rightEdge[i];
+          ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.strokeStyle = '#777';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([20, 16]);
+        ctx.beginPath();
+        for (var i = 0; i < TRACK_POINTS.length; i++) {
+          var p = worldToScreen(TRACK_POINTS[i].x, TRACK_POINTS[i].y, camera);
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        gameCars.forEach(function (car) {
+          if (!car.alive) return;
+          var pos = getTrackPosition(car.trackPos);
+          var normalX = -pos.dy;
+          var normalY = pos.dx;
+          var worldX = pos.x + normalX * car.offset;
+          var worldY = pos.y + normalY * car.offset;
+          var screen = worldToScreen(worldX, worldY, camera);
+          var alpha = 1;
+          if (car.peerId === myPeerId || car.peerId === myPeerId + '-p2') alpha = 1;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.translate(screen.x, screen.y);
+          ctx.rotate(car.heading + Math.PI / 2);
+          ctx.fillStyle = car.color;
+          ctx.fillRect(-12, -20, 24, 40);
+          ctx.fillStyle = '#111';
+          ctx.fillRect(-10, -16, 20, 28);
+          ctx.fillStyle = '#999';
+          ctx.fillRect(-12, -20, 24, 6);
+          ctx.restore();
+        });
+
+        renderGameHUD();
+      }
+
+      function renderGameHUD() {
+        var alive = gameCars.filter(function (c) { return c.alive; }).length;
+        ctx.fillStyle = '#0ff';
+        ctx.font = 'bold 24px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('Time: ' + gameTime.toFixed(1) + 's', 20, 40);
+        ctx.fillText('Cars left: ' + alive, 20, 70);
+        ctx.fillText('Level: ' + cfg.level, 20, 100);
+        ctx.fillStyle = '#888';
+        ctx.font = '16px monospace';
+        ctx.fillText('Lead camera keeps 1/3 of the track ahead visible.', 20, 130);
+      }
+
+      function renderGameOver() {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+        ctx.fillRect(0, 0, GW, GH);
+        var winner = gameCars.filter(function (c) { return c.alive; })[0] || null;
+        ctx.fillStyle = '#0ff';
+        ctx.font = 'bold 80px monospace';
+        ctx.textAlign = 'center';
+        if (winner) {
+          ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
+          ctx.fillStyle = winner.color;
+          ctx.fillText((winner.peerId.endsWith('-p2') ? 'LOCAL WASD' : 'LOCAL ARROW') + ' CAR', GW / 2, GH / 2 + 50);
+        } else {
+          ctx.fillText('TIE!', GW / 2, GH / 2);
+        }
+        ctx.fillStyle = '#888';
+        ctx.font = '24px monospace';
+        if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
+          ctx.fillText('SPACE to return to lobby', GW / 2, GH / 2 + 150);
+        }
+      }
+
+      function checkGameOver() {
+        if (lobbyState !== 'game') return;
+        var aliveCars = gameCars.filter(function (c) { return c.alive; });
+        if (aliveCars.length <= 1) {
+          lobbyState = 'gameover';
+          gameOverTime = performance.now() / 1000;
+          if (isHost) {
+            broadcast({ type: 'gameover' });
+          }
+        }
+      }
+
+      function updateEliminations() {
+        if (lobbyState !== 'game') return;
+        var camera = getCamera();
+        for (var i = 0; i < gameCars.length; i++) {
+          var car = gameCars[i];
+          if (!car.alive) continue;
+          var relX = car.worldX - camera.x;
+          var relY = car.worldY - camera.y;
+          var forward = relX * camera.dx + relY * camera.dy;
+          var side = relX * -camera.dy + relY * camera.dx;
+          if (forward < -GH * 0.4 || Math.abs(side) > GW * 0.55) {
+            car.alive = false;
+          }
+        }
+      }
+
+      function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        GW = canvas.width;
+        GH = canvas.height;
+      }
+
+      function gameLoop(now) {
+        if (!lastTime) lastTime = now;
+        var dt = (now - lastTime) / 1000;
+        lastTime = now;
+        if (dt > 0.05) dt = 0.05;
+        if (dt < 0.001) dt = 0.001;
+
+        if (lobbyState === 'lobby') {
+          updateHoldLeft(dt);
+          updateHoldRight(dt);
+          renderLobby();
+        } else if (lobbyState === 'countdown') {
+          updateHoldLeft(dt);
+          updateHoldRight(dt);
+          countdownTimer -= dt;
+          if (countdownTimer <= 0) {
+            startGame({ level: selectedLevel });
+          }
+          renderLobby();
+        } else if (lobbyState === 'game') {
+          gameTime += dt;
+          if (isHost) {
+            gameCars.forEach(function (car) {
+              if (!car.isAI) applyPlayerControl(car, dt);
+            });
+            gameCars.forEach(function (car) {
+              updateCar(car, dt);
+            });
+            updateEliminations();
+            checkGameOver();
+            stateSendAccumulator += dt;
+            if (stateSendAccumulator >= 0.05) {
+              stateSendAccumulator = 0;
+              broadcast({
+                type: 'state',
+                cars: gameCars.map(function (car) {
+                  return {
+                    peerId: car.peerId,
+                    trackPos: car.trackPos,
+                    offset: car.offset,
+                    speed: car.speed,
+                    alive: car.alive
+                  };
+                }),
+                gameTime: gameTime
+              });
+            }
+          } else {
+            renderGame();
+          }
+          renderGame();
+        } else if (lobbyState === 'gameover') {
+          renderGame();
+          renderGameOver();
+        }
+
+        hud.textContent = BUILD + ' | ' + myPeerId.slice(0, 4) + ' | ' + (isHost ? 'HOST' : 'client') + ' | ' + lobbyState;
+        requestAnimationFrame(gameLoop);
+      }
+
+      function init() {
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        connectSignaling();
+        requestAnimationFrame(gameLoop);
+      }
+
+      window.addEventListener('keydown', function (e) {
+        if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+          if ((e.key === 'w' || e.key === 'W') && !e.repeat) {
+            holdingLeft = true;
+            leftHoldStart = performance.now();
+            if (mySlotIndex < 0) {
+              mySlotIndex = claimSlot(myPeerId, myDeviceInfo);
+            }
+            e.preventDefault();
+            return;
+          }
+          if (e.key === 'ArrowUp' && !e.repeat) {
+            holdingRight = true;
+            rightHoldStart = performance.now();
+            e.preventDefault();
+            return;
+          }
+          if (e.key === 'ArrowLeft' && selectedLevel > 1) {
+            selectedLevel--;
+            e.preventDefault();
+            return;
+          }
+          if (e.key === 'ArrowRight' && selectedLevel < 10) {
+            selectedLevel++;
+            e.preventDefault();
+            return;
+          }
+        }
+
+        if (lobbyState === 'game') {
+          if (e.key === 'ArrowLeft') keys.l = true;
+          if (e.key === 'ArrowRight') keys.r = true;
+          if (e.key === 'ArrowUp') keys.u = true;
+          if (e.key === 'ArrowDown') keys.d = true;
+          if (e.key === 'a' || e.key === 'A') keys2.l = true;
+          if (e.key === 'd' || e.key === 'D') keys2.r = true;
+          if (e.key === 'w' || e.key === 'W') keys2.u = true;
+          if (e.key === 's' || e.key === 'S') keys2.d = true;
+        }
+
+        if (e.key === 'Escape' || e.key === '`') {
+          if (lobbyState === 'game' || lobbyState === 'gameover') {
+            lobbyState = 'lobby';
+            cfg = null;
+            resetLobbyState();
+            broadcast({ type: 'lobby-reset' });
+          }
+        }
+      });
+
+      window.addEventListener('keyup', function (e) {
+        if (e.key === 'w' || e.key === 'W') {
+          if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+            releaseHoldLeft();
+          }
+          keys2.u = false;
+        }
+        if (e.key === 'ArrowUp') {
+          if (lobbyState === 'lobby' || lobbyState === 'countdown') {
+            releaseHoldRight();
+          }
+          keys.u = false;
+        }
+        if (e.key === 'ArrowLeft') keys.l = false;
+        if (e.key === 'ArrowRight') keys.r = false;
+        if (e.key === 'ArrowDown') keys.d = false;
+        if (e.key === 'a' || e.key === 'A') keys2.l = false;
+        if (e.key === 'd' || e.key === 'D') keys2.r = false;
+        if (e.key === 's' || e.key === 'S') keys2.d = false;
+        if ((e.key === ' ' || e.key === 'Enter') && lobbyState === 'gameover') {
+          lobbyState = 'lobby';
+          cfg = null;
+          resetLobbyState();
+          broadcast({ type: 'lobby-reset' });
+        }
+      });
+
+      init();
     </script>
   </body>
 </html>
