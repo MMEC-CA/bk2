@@ -782,10 +782,10 @@
       var startX = (GW - (slotW * cols + slotGap * (cols - 1))) / 2;
       var startY = Math.max(topOffset + 20, GH * 0.18);
       for (var i = 0; i < cols * rows; i++) {
-        var col = i % 4;
-        var row = Math.floor(i / 4);
-        var sx = startX + col * slotW;
-        var sy = startY + row * slotH;
+        var col = i % cols;
+        var row = Math.floor(i / cols);
+        var sx = startX + col * (slotW + slotGap);
+        var sy = startY + row * (slotH + slotGap);
         var slot = slots[i];
         
         // Background
