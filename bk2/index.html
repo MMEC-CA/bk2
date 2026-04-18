@@ -32,29 +32,60 @@
     var GW = 1920, GH = 1080;
 
     // Car racing physics constants
-    var CAR_WIDTH = 24;
-    var CAR_HEIGHT = 40;
-    var TRACK_WIDTH = 180;      // Width of racing surface
-    var MAX_SPEED = 400;        // Pixels per second
-    var ACCELERATION = 1200;    // Acceleration rate
+    var BASE_CAR_WIDTH = 24;
+    var BASE_CAR_HEIGHT = 40;
+    var BASE_TRACK_WIDTH = 180;      // Base width of racing surface
+    var BASE_MAX_SPEED = 400;        // Base pixels per second
+    var BASE_ACCELERATION = 1200;    // Base acceleration rate
+    var CAR_WIDTH = BASE_CAR_WIDTH;
+    var CAR_HEIGHT = BASE_CAR_HEIGHT;
+    var TRACK_WIDTH = BASE_TRACK_WIDTH;      // Width of racing surface
+    var MAX_SPEED = BASE_MAX_SPEED;        // Pixels per second
+    var ACCELERATION = BASE_ACCELERATION;    // Acceleration rate
     var TURN_RATE = 3.5;        // Radians per second steering
     var FRICTION = 0.95;        // Velocity decay per frame
     var WALL_BOUNCE = 0.6;      // Elasticity on wall collision
     var LAPS_TO_WIN = 3;        // Race length
     var AI_COUNT = 4;           // Number of AI cars to fill slots
 
-    // Track definition - circular path fitting on screen
-    var trackPoints = [
-      {x: 960, y: 200},     // Start/Finish at top-center
-      {x: 1600, y: 400},    // Right curve
-      {x: 1600, y: 800},    // Right bottom
-      {x: 960, y: 900},     // Bottom center
-      {x: 320, y: 800},     // Left bottom
-      {x: 320, y: 400},     // Left top
-      {x: 960, y: 200}      // Return to start (closes loop)
+    // Track definition - normalized path that will scale to the current window
+    var normalizedTrackPoints = [
+      {x: 0.50, y: 0.15},     // Start/Finish at top-center
+      {x: 0.83, y: 0.37},    // Right curve
+      {x: 0.83, y: 0.74},    // Right bottom
+      {x: 0.50, y: 0.84},    // Bottom center
+      {x: 0.17, y: 0.74},    // Left bottom
+      {x: 0.17, y: 0.37},    // Left top
+      {x: 0.50, y: 0.15}      // Return to start (closes loop)
     ];
+    var trackPoints = [];
     var trackLengths = [];
     var TRACK_TOTAL_LENGTH = 0;
+
+    function updateTrackLayout() {
+      var minDim = Math.min(GW, GH);
+      var inset = Math.max(40, Math.min(120, minDim * 0.08));
+      var trackWidth = GW - inset * 2;
+      var trackHeight = GH - inset * 2;
+      var offsetX = (GW - trackWidth) / 2;
+      var offsetY = (GH - trackHeight) / 2;
+
+      trackPoints = normalizedTrackPoints.map(function(p) {
+        return {
+          x: offsetX + p.x * trackWidth,
+          y: offsetY + p.y * trackHeight
+        };
+      });
+
+      TRACK_WIDTH = Math.max(80, Math.min(BASE_TRACK_WIDTH, minDim * 0.16));
+      CAR_WIDTH = Math.max(16, Math.min(BASE_CAR_WIDTH, minDim * 0.03));
+      CAR_HEIGHT = Math.max(24, Math.min(BASE_CAR_HEIGHT, minDim * 0.055));
+      var speedScale = TRACK_WIDTH / BASE_TRACK_WIDTH;
+      MAX_SPEED = Math.max(180, BASE_MAX_SPEED * speedScale);
+      ACCELERATION = Math.max(500, BASE_ACCELERATION * speedScale);
+
+      buildTrackLengths();
+    }
 
     function buildTrackLengths() {
       trackLengths = [0];
@@ -717,31 +748,39 @@
       
       // Title
       ctx.fillStyle = '#0ff';
-      ctx.font = 'bold ' + Math.max(32, Math.min(60, GW / 32)) + 'px monospace';
+      var titleFont = Math.max(24, Math.min(52, GW * 0.04, GH * 0.07));
+      ctx.font = 'bold ' + titleFont + 'px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('CAR CAR', GW / 2, Math.max(60, GH * 0.07));
+      var titleY = Math.max(48, GH * 0.08);
+      ctx.fillText('CAR CAR', GW / 2, titleY);
       
       // Version
-      ctx.font = 'bold ' + Math.max(10, Math.min(14, GW / 160)) + 'px monospace';
-      ctx.fillStyle = '#666';
-      ctx.fillText(BUILD, GW / 2, Math.max(85, GH * 0.11));
+      ctx.font = 'bold ' + Math.max(10, Math.min(16, GW * 0.02, GH * 0.03)) + 'px monospace';
+      ctx.fillStyle = '#aaa';
+      var versionY = titleY + Math.max(26, GH * 0.03);
+      ctx.fillText(BUILD, GW / 2, versionY);
       
       // Level chooser
-      ctx.font = 'bold ' + Math.max(18, Math.min(32, GW / 60)) + 'px monospace';
+      var selectorY = versionY + Math.max(36, GH * 0.04);
+      ctx.font = 'bold ' + Math.max(16, Math.min(28, GW * 0.03, GH * 0.04)) + 'px monospace';
       ctx.fillStyle = selectedLevel > 1 ? '#fff' : '#444';
-      ctx.fillText('<', GW * 0.35, 150);
+      ctx.fillText('<', GW * 0.30, selectorY);
       ctx.fillStyle = '#0ff';
-      ctx.fillText('Level ' + selectedLevel, GW / 2, 150);
+      ctx.fillText('Level ' + selectedLevel, GW / 2, selectorY);
       ctx.fillStyle = selectedLevel < 100 ? '#fff' : '#444';
-      ctx.fillText('>', GW * 0.65, 150);
+      ctx.fillText('>', GW * 0.70, selectorY);
       
-      // Slot grid (3x4)
-      var cols = 4;
-      var rows = 3;
-      var slotW = Math.min(280, Math.max(160, (GW - 120) / cols));
-      var slotH = Math.min(180, Math.max(120, (GH - 260) / rows));
-      var startX = (GW - slotW * cols) / 2;
-      var startY = Math.max(220, GH * 0.25);
+      // Slot grid
+      var cols = GW > 1000 ? 4 : GW > 700 ? 3 : 2;
+      var rows = Math.ceil(12 / cols);
+      var slotGap = Math.max(6, Math.min(12, GW * 0.01));
+      var topOffset = selectorY + Math.max(28, GH * 0.04);
+      var availableWidth = GW - slotGap * (cols + 1);
+      var availableHeight = GH - topOffset - Math.max(100, GH * 0.18);
+      var slotW = Math.min(260, Math.max(80, availableWidth / cols));
+      var slotH = Math.min(140, Math.max(60, availableHeight / rows));
+      var startX = (GW - (slotW * cols + slotGap * (cols - 1))) / 2;
+      var startY = Math.max(topOffset + 20, GH * 0.18);
       for (var i = 0; i < cols * rows; i++) {
         var col = i % 4;
         var row = Math.floor(i / 4);
@@ -789,30 +828,34 @@
         
         // Info
         ctx.fillStyle = '#fff';
-        ctx.font = '14px monospace';
+        ctx.font = Math.max(10, Math.min(14, slotH * 0.18)) + 'px monospace';
         ctx.textAlign = 'left';
         if (slot.peerId) {
-          ctx.fillText(SLOT_COLORS[i].name, sx + 10, sy + 30);
+          ctx.fillText(SLOT_COLORS[i].name, sx + 10, sy + Math.max(24, slotH * 0.18) + 4);
           ctx.fillStyle = '#aaa';
-          ctx.font = '12px monospace';
-          ctx.fillText(slot.deviceInfo.substring(0, 20), sx + 10, sy + 50);
+          ctx.font = Math.max(10, Math.min(12, slotH * 0.14)) + 'px monospace';
+          ctx.fillText(slot.deviceInfo.substring(0, 20), sx + 10, sy + Math.max(40, slotH * 0.24));
         } else {
           ctx.fillStyle = '#666';
-          ctx.fillText('[empty]', sx + 10, sy + 30);
+          ctx.fillText('[empty]', sx + 10, sy + Math.max(24, slotH * 0.18) + 4);
         }
       }
       
       // Instructions
       ctx.fillStyle = '#888';
-      ctx.font = Math.max(12, Math.min(18, GW / 70)) + 'px monospace';
+      ctx.font = Math.max(10, Math.min(16, Math.min(GW, GH) * 0.025)) + 'px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('Hold W for left player, UP arrow for right player', GW / 2, GH - 60);
-      ctx.fillText('Use A/D + Left/Right arrows to steer, W/Up to accelerate', GW / 2, GH - 36);
+      if (GH > 220) {
+        ctx.fillText('Hold W for left player, UP arrow for right player', GW / 2, GH - 50);
+        ctx.fillText('Use A/D + Left/Right arrows to steer, W/Up to accelerate', GW / 2, GH - 28);
+      } else {
+        ctx.fillText('Use A/D + Left/Right arrows to steer, W/Up to accelerate', GW / 2, GH - 32);
+      }
       
       // Countdown display
       if (lobbyState === 'countdown') {
         ctx.fillStyle = '#0ff';
-        ctx.font = 'bold 120px monospace';
+        ctx.font = 'bold ' + Math.max(52, Math.min(120, GH * 0.18)) + 'px monospace';
         ctx.fillText(Math.ceil(countdownTimer), GW / 2, GH / 2);
       }
     }
@@ -884,12 +927,12 @@
       
       // HUD
       ctx.fillStyle = '#0ff';
-      ctx.font = 'bold 24px monospace';
+      ctx.font = 'bold ' + Math.max(14, Math.min(24, GH * 0.035)) + 'px monospace';
       ctx.textAlign = 'left';
-      ctx.fillText('Time: ' + gameTime.toFixed(1) + 's', 20, 40);
+      ctx.fillText('Time: ' + gameTime.toFixed(1) + 's', Math.max(12, GW * 0.02), Math.max(28, GH * 0.035 * 1.5));
       
       // Show lap counters for each car
-      var y = 70;
+      var y = Math.max(72, GH * 0.065);
       for (var i = 0; i < gameCars.length; i++) {
         var car = gameCars[i];
         if (!car.isAI && car.alive) {
@@ -908,21 +951,21 @@
       var winner = finishedCars.length >= 1 ? finishedCars[0] : null;
       
       ctx.fillStyle = '#0ff';
-      ctx.font = 'bold 80px monospace';
+      ctx.font = 'bold ' + Math.max(36, Math.min(80, GH * 0.08)) + 'px monospace';
       ctx.textAlign = 'center';
       if (winner) {
-        ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
+        ctx.fillText('WINNER!', GW / 2, GH / 2 - Math.max(40, GH * 0.05));
         ctx.fillStyle = winner.color;
         var winnerName = winner.isAI ? 'AI CAR' : SLOT_COLORS[winner.slotIndex].name + ' Car';
-        ctx.fillText(winnerName, GW / 2, GH / 2 + 50);
+        ctx.fillText(winnerName, GW / 2, GH / 2 + Math.max(40, GH * 0.05));
       } else {
         ctx.fillText('RACE INCOMPLETE', GW / 2, GH / 2);
       }
       
       ctx.fillStyle = '#888';
-      ctx.font = '24px monospace';
+      ctx.font = Math.max(14, Math.min(24, GH * 0.04)) + 'px monospace';
       if (performance.now() / 1000 - gameOverTime > GAME_OVER_LOCKOUT) {
-        ctx.fillText('SPACE to return to lobby', GW / 2, GH / 2 + 150);
+        ctx.fillText('SPACE to return to lobby', GW / 2, GH / 2 + Math.max(88, GH * 0.1));
       }
     }
 
@@ -1332,6 +1375,7 @@
       canvas.height = window.innerHeight;
       GW = canvas.width;
       GH = canvas.height;
+      updateTrackLayout();
     }
 
     function gameLoop(now) {
