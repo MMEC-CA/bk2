@@ -42,10 +42,10 @@
     var TRACK_WIDTH = BASE_TRACK_WIDTH;      // Width of racing surface
     var MAX_SPEED = BASE_MAX_SPEED;        // Pixels per second
     var ACCELERATION = BASE_ACCELERATION;    // Acceleration rate
-    var TURN_RATE = 3.5;        // Radians per second steering
+    var TURN_RATE = 10.5;       // Radians per second steering (3x faster)
     var FRICTION = 0.95;        // Velocity decay per frame
     var WALL_BOUNCE = 0.6;      // Elasticity on wall collision
-    var LAPS_TO_WIN = 3;        // Race length
+    var LAPS_TO_WIN = 1;        // Race length (1 lap to finish)
     var AI_COUNT = 4;           // Number of AI cars to fill slots
 
     // Track definition - normalized path that will scale to the current window
@@ -310,24 +310,30 @@
       var distFromCenter = dx * normalX + dy * normalY;
       
       if (Math.abs(distFromCenter) > TRACK_WIDTH / 2) {
-        // Hit wall - bounce back
-        var penetration = Math.abs(distFromCenter) - TRACK_WIDTH / 2;
-        var bounceDir = distFromCenter > 0 ? -1 : 1;
-        
-        // Move back to track boundary
-        this.x -= normalX * penetration * bounceDir;
-        this.y -= normalY * penetration * bounceDir;
-        
-        // Reflect velocity
-        var dot = this.vx * normalX + this.vy * normalY;
-        this.vx -= 2 * dot * normalX * WALL_BOUNCE;
-        this.vy -= 2 * dot * normalY * WALL_BOUNCE;
-        
-        // Reduce speed and add spin
-        this.velocity *= 0.7;
-        this.spinVelocity += (Math.random() - 0.5) * 4;
-        
-        playTone(200, 0.1, 0.2);
+        // Outside track boundary
+        if (distFromCenter > 0) {
+          // Outside (off the track) - car is eliminated
+          this.alive = false;
+          playTone(100, 0.1, 0.3);
+        } else {
+          // Inside wall - bounce back
+          var penetration = Math.abs(distFromCenter) - TRACK_WIDTH / 2;
+          
+          // Move back to track boundary
+          this.x += normalX * penetration;
+          this.y += normalY * penetration;
+          
+          // Reflect velocity
+          var dot = this.vx * normalX + this.vy * normalY;
+          this.vx -= 2 * dot * normalX * WALL_BOUNCE;
+          this.vy -= 2 * dot * normalY * WALL_BOUNCE;
+          
+          // Reduce speed and add spin
+          this.velocity *= 0.7;
+          this.spinVelocity += (Math.random() - 0.5) * 4;
+          
+          playTone(200, 0.1, 0.2);
+        }
       }
     };
     
