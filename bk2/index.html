@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <meta name="robots" content="noindex, nofollow">
-  <title>Marble Sadness</title>
+  <title>Car Car</title>
     <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; }
@@ -18,12 +18,12 @@
   <canvas id="game"></canvas>
   <script>
     // ============================================================
-    // MARBLE SADNESS - Multiplayer Marble Rolling Game
+    // CAR CAR - Multiplayer Racing Game
     // ============================================================
-    // Lobby: 12 color slots, level chooser (table tilt angles)
-    // Game: Marbles roll on tilting table surface
-    //   - Gravity pulls marbles off table
-    //   - Last marble on table wins
+    // Lobby: 12 color slots, level chooser (difficulty modifiers)
+    // Game: Cars race around track, 3 laps to win
+    //   - Car-to-car collisions to knock opponents off track
+    //   - Wall bouncing with speed loss and spin
     //   - WASD + Arrow keys for 2-player local play
     //   - WebRTC for LAN multiplayer
     // ============================================================
@@ -31,19 +31,64 @@
     var BUILD = 'v2026-04-18-c';
     var GW = 1920, GH = 1080;
 
-    // Physics constants
-    var GRAV_ACCEL = 0;
-    var FRICTION = 0.95;    // per-frame decay
-    var MARBLE_RADIUS = 8;
-    var TABLE_MAX_WIDTH = 1600;
-    var TABLE_MAX_HEIGHT = 900;
-    var TABLE_MIN_WIDTH = 600;
-    var TABLE_MIN_HEIGHT = 340;
-    var TABLE_WIDTH = 1600;
-    var TABLE_HEIGHT = 900;
-    var TABLE_CENTER_X = GW / 2;
-    var TABLE_CENTER_Y = GH / 2;
-    var TABLE_RADIUS = Math.min(TABLE_WIDTH, TABLE_HEIGHT) * 0.45;
+    // Car racing physics constants
+    var CAR_WIDTH = 24;
+    var CAR_HEIGHT = 40;
+    var TRACK_WIDTH = 180;      // Width of racing surface
+    var MAX_SPEED = 400;        // Pixels per second
+    var ACCELERATION = 1200;    // Acceleration rate
+    var TURN_RATE = 3.5;        // Radians per second steering
+    var FRICTION = 0.95;        // Velocity decay per frame
+    var WALL_BOUNCE = 0.6;      // Elasticity on wall collision
+    var LAPS_TO_WIN = 3;        // Race length
+    var AI_COUNT = 4;           // Number of AI cars to fill slots
+
+    // Track definition - circular path fitting on screen
+    var trackPoints = [
+      {x: 960, y: 200},     // Start/Finish at top-center
+      {x: 1600, y: 400},    // Right curve
+      {x: 1600, y: 800},    // Right bottom
+      {x: 960, y: 900},     // Bottom center
+      {x: 320, y: 800},     // Left bottom
+      {x: 320, y: 400},     // Left top
+      {x: 960, y: 200}      // Return to start (closes loop)
+    ];
+    var trackLengths = [];
+    var TRACK_TOTAL_LENGTH = 0;
+
+    function buildTrackLengths() {
+      trackLengths = [0];
+      for (var i = 1; i < trackPoints.length; i++) {
+        var dx = trackPoints[i].x - trackPoints[i - 1].x;
+        var dy = trackPoints[i].y - trackPoints[i - 1].y;
+        var segmentLen = Math.hypot(dx, dy);
+        trackLengths.push(trackLengths[i - 1] + segmentLen);
+      }
+      TRACK_TOTAL_LENGTH = trackLengths[trackLengths.length - 1];
+    }
+
+    function getTrackPosition(trackPos) {
+      trackPos = Math.max(0, Math.min(TRACK_TOTAL_LENGTH, trackPos));
+      var idx = 0;
+      while (idx < trackLengths.length - 1 && trackLengths[idx + 1] <= trackPos) {
+        idx++;
+      }
+      var start = trackPoints[idx];
+      var end = trackPoints[Math.min(idx + 1, trackPoints.length - 1)];
+      var segmentLen = trackLengths[idx + 1] - trackLengths[idx] || 1;
+      var t = (trackPos - trackLengths[idx]) / segmentLen;
+      var dx = end.x - start.x;
+      var dy = end.y - start.y;
+      var dist = Math.hypot(dx, dy) || 1;
+      var ux = dx / dist;
+      var uy = dy / dist;
+      return {
+        x: start.x + ux * segmentLen * t,
+        y: start.y + uy * segmentLen * t,
+        dx: ux,
+        dy: uy
+      };
+    }
 
     var SLOT_COLORS = [
       { hex: '#ff0000', name: 'Red' },
@@ -77,9 +122,8 @@
 
     // Game state
     var gameTime = 0, lastTime = 0;
-    var gameMarbles = [];     // all marbles in game
-    var playerMarbles = {};   // peerId -> marble
-    var playerLives = {};     // peerId -> alive (true/false)
+    var gameCars = [];        // all cars in race
+    var playerCars = {};      // peerId -> car
     var cfg = null;           // current level config
 
     // Timing
@@ -90,9 +134,6 @@
     var myDeviceInfo = getDeviceInfo();
     var isHost = false;
     var hostPeerId = null;
-    var PLAYER_ACCEL = 1800;
-    var MAX_PLAYER_SPEED = 1200;
-    var AI_MARBLES = 3;
     var HOLD_DURATION = 3.0;
 
     // Lobby slots
@@ -163,111 +204,191 @@
     }
 
     // ============================================================
-    // MARBLE PHYSICS
+    // CAR PHYSICS
     // ============================================================
-    function Marble(peerId, color, slotIndex) {
+    function Car(peerId, color, slotIndex) {
       this.peerId = peerId;
       this.color = color;
       this.slotIndex = slotIndex;
-      var angle = Math.random() * Math.PI * 2;
-      var radius = TABLE_RADIUS * 0.3 * Math.sqrt(Math.random());
-      this.x = TABLE_CENTER_X + Math.cos(angle) * radius;
-      this.y = TABLE_CENTER_Y + Math.sin(angle) * radius;
+      this.isAI = false;
+      
+      // Position & rotation
+      this.x = trackPoints[0].x;  // Start at finish line
+      this.y = trackPoints[0].y;
+      this.angle = 0;            // Facing up initially
+      
+      // Velocity
+      this.velocity = 0;
       this.vx = 0;
       this.vy = 0;
-      this.alive = true;
-      this.radius = MARBLE_RADIUS;
-    }
-    Marble.prototype.update = function(dt, cfgData) {
-      if (!this.alive) return;
       
-      // Apply slow arena friction and any control or AI forces
-      this.vx *= cfgData.friction;
-      this.vy *= cfgData.friction;
+      // Track position
+      this.trackPosition = 0;
+      this.lapsCompleted = 0;
+      this.isFinished = false;
+      this.alive = true;
+      
+      // Physics state
+      this.spinVelocity = 0;     // Angular velocity
+      this.lastImpactTime = 0;
+    }
+    
+    Car.prototype.update = function(dt, cfgData) {
+      if (!this.alive || this.isFinished) return;
+      
+      // Apply steering to angle
+      this.angle += this.spinVelocity * dt;
+      this.spinVelocity *= 0.9;  // Angular friction
+      
+      // Update velocity components
+      this.vx = Math.sin(this.angle) * this.velocity;
+      this.vy = -Math.cos(this.angle) * this.velocity;
+      
+      // Apply friction
+      this.velocity *= FRICTION;
       
       // Update position
       this.x += this.vx * dt;
       this.y += this.vy * dt;
       
-      // Check if marble fell off circular table
-      var dx = this.x - TABLE_CENTER_X;
-      var dy = this.y - TABLE_CENTER_Y;
-      if (Math.sqrt(dx * dx + dy * dy) > TABLE_RADIUS + this.radius) {
-        this.alive = false;
+      // Update track position (simplified - distance along track)
+      this.trackPosition += this.velocity * dt;
+      if (this.trackPosition >= TRACK_TOTAL_LENGTH) {
+        this.trackPosition -= TRACK_TOTAL_LENGTH;
+        this.lapsCompleted++;
+        if (this.lapsCompleted >= LAPS_TO_WIN) {
+          this.isFinished = true;
+          playTone(880, 0.2, 0.3);
+        }
+      }
+      
+      // Check wall collision
+      this.checkWallCollision();
+    };
+    
+    Car.prototype.checkWallCollision = function() {
+      var pos = getTrackPosition(this.trackPosition);
+      var trackDirX = pos.dx;
+      var trackDirY = pos.dy;
+      var normalX = -trackDirY;
+      var normalY = trackDirX;
+      
+      // Distance from track centerline
+      var dx = this.x - pos.x;
+      var dy = this.y - pos.y;
+      var distFromCenter = dx * normalX + dy * normalY;
+      
+      if (Math.abs(distFromCenter) > TRACK_WIDTH / 2) {
+        // Hit wall - bounce back
+        var penetration = Math.abs(distFromCenter) - TRACK_WIDTH / 2;
+        var bounceDir = distFromCenter > 0 ? -1 : 1;
+        
+        // Move back to track boundary
+        this.x -= normalX * penetration * bounceDir;
+        this.y -= normalY * penetration * bounceDir;
+        
+        // Reflect velocity
+        var dot = this.vx * normalX + this.vy * normalY;
+        this.vx -= 2 * dot * normalX * WALL_BOUNCE;
+        this.vy -= 2 * dot * normalY * WALL_BOUNCE;
+        
+        // Reduce speed and add spin
+        this.velocity *= 0.7;
+        this.spinVelocity += (Math.random() - 0.5) * 4;
+        
         playTone(200, 0.1, 0.2);
       }
     };
-    Marble.prototype.render = function() {
+    
+    Car.prototype.render = function() {
       if (!this.alive) return;
+      
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+      
+      // Draw car as rectangle
       ctx.fillStyle = this.color;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.fillRect(-CAR_WIDTH/2, -CAR_HEIGHT/2, CAR_WIDTH, CAR_HEIGHT);
+      
+      // Draw direction indicator (front of car)
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-2, -CAR_HEIGHT/2 - 4, 4, 8);
+      
+      ctx.restore();
     };
 
-    function createMarble(peerId, color, slotIndex, isAI) {
-      var m = new Marble(peerId, color, slotIndex);
-      m.isAI = !!isAI;
-      m.aiTimer = 0;
-      m.aiTarget = null;
-      return m;
+    function createCar(peerId, color, slotIndex, isAI) {
+      var c = new Car(peerId, color, slotIndex);
+      c.isAI = !!isAI;
+      c.aiTimer = 0;
+      c.aiTargetAngle = 0;
+      return c;
     }
 
-    function setupGameMarbles(defs) {
-      gameMarbles = [];
-      playerMarbles = {};
-      playerLives = {};
+    function setupGameCars(defs) {
+      gameCars = [];
+      playerCars = {};
       defs.forEach(function(d) {
-        var m = createMarble(d.peerId, d.color, d.slotIndex, d.isAI);
-        gameMarbles.push(m);
-        if (!m.isAI) playerMarbles[m.peerId] = m;
-        playerLives[m.peerId] = true;
+        var c = createCar(d.peerId, d.color, d.slotIndex, d.isAI);
+        gameCars.push(c);
+        if (!c.isAI) playerCars[c.peerId] = c;
       });
     }
 
-    function applyPlayerControl(m, dt) {
-      if (!m.alive) return;
+    function applyPlayerControl(c, dt) {
+      if (!c.alive || c.isFinished) return;
       var localKeys = null;
-      if (m.peerId === myPeerId) {
-        localKeys = keys2;
-      } else if (m.peerId === localPlayer2PeerId) {
-        localKeys = keys;
+      if (c.peerId === myPeerId) {
+        localKeys = keys2;  // WASD for player 1
+      } else if (c.peerId === localPlayer2PeerId) {
+        localKeys = keys;   // Arrow keys for player 2
       }
       if (!localKeys) return;
-      var ax = 0, ay = 0;
-      if (localKeys.l) ax -= PLAYER_ACCEL;
-      if (localKeys.r) ax += PLAYER_ACCEL;
-      if (localKeys.u) ay -= PLAYER_ACCEL;
-      if (localKeys.d) ay += PLAYER_ACCEL;
-      m.vx += ax * dt;
-      m.vy += ay * dt;
-      var speed = Math.hypot(m.vx, m.vy);
-      if (speed > MAX_PLAYER_SPEED) {
-        var scale = MAX_PLAYER_SPEED / speed;
-        m.vx *= scale;
-        m.vy *= scale;
-      }
+      
+      // Steering (left/right)
+      var steer = 0;
+      if (localKeys.l) steer -= 1;
+      if (localKeys.r) steer += 1;
+      c.spinVelocity += steer * TURN_RATE * dt;
+      
+      // Acceleration/braking (up/down)
+      var accel = 0;
+      if (localKeys.u) accel += 1;
+      if (localKeys.d) accel -= 0.5;  // Braking is less powerful
+      c.velocity += accel * ACCELERATION * dt;
+      
+      // Clamp velocity
+      c.velocity = Math.max(-MAX_SPEED * 0.5, Math.min(MAX_SPEED, c.velocity));
     }
 
-    function updateAI(m, dt) {
-      if (!m.alive) return;
-      m.aiTimer -= dt;
-      if (m.aiTimer <= 0 || !m.aiTarget || !m.aiTarget.alive) {
-        var targets = gameMarbles.filter(function(other) {
-          return other.alive && !other.isAI && other !== m;
-        });
-        if (!targets.length) {
-          targets = gameMarbles.filter(function(other) {
-            return other.alive && other !== m;
-          });
-        }
-        if (targets.length) {
-          m.aiTarget = targets[Math.floor(Math.random() * targets.length)];
-        }
-        m.aiTimer = 0.4 + Math.random() * 0.6;
+    function updateAI(c, dt) {
+      if (!c.alive || c.isFinished) return;
+      
+      c.aiTimer -= dt;
+      if (c.aiTimer <= 0) {
+        // Simple AI: follow track with some randomness
+        var pos = getTrackPosition(c.trackPosition + 50);  // Look ahead
+        var targetAngle = Math.atan2(pos.y - c.y, pos.x - c.x);
+        c.aiTargetAngle = targetAngle + (Math.random() - 0.5) * 0.5;  // Add some randomness
+        c.aiTimer = 0.2 + Math.random() * 0.3;
+      }
+      
+      // Steer towards target angle
+      var angleDiff = c.aiTargetAngle - c.angle;
+      while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+      while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+      
+      var steerForce = Math.max(-1, Math.min(1, angleDiff * 2));
+      c.spinVelocity += steerForce * TURN_RATE * dt * 0.8;  // AI steers slower
+      
+      // Random acceleration
+      if (Math.random() < 0.7) {
+        c.velocity += ACCELERATION * dt * 0.6;  // AI accelerates most of the time
+      }
+      
+      c.velocity = Math.max(0, Math.min(MAX_SPEED * 0.8, c.velocity));  // AI doesn't brake
+    }
       }
       if (m.aiTarget) {
         var dx = m.aiTarget.x - m.x;
@@ -279,39 +400,60 @@
       }
     }
 
-    function resolveMarbleCollisions() {
-      for (var i = 0; i < gameMarbles.length; i++) {
-        var a = gameMarbles[i];
-        if (!a.alive) continue;
-        for (var j = i + 1; j < gameMarbles.length; j++) {
-          var b = gameMarbles[j];
-          if (!b.alive) continue;
-          var dx = b.x - a.x;
-          var dy = b.y - a.y;
-          var dist = Math.sqrt(dx * dx + dy * dy);
-          var minDist = a.radius + b.radius;
-          if (dist <= 0) {
-            dx = 1;
-            dy = 0;
-            dist = 1;
-          }
-          if (dist < minDist) {
-            var overlap = (minDist - dist) * 0.5;
+    function resolveCarCollisions() {
+      for (var i = 0; i < gameCars.length; i++) {
+        var a = gameCars[i];
+        if (!a.alive || a.isFinished) continue;
+        for (var j = i + 1; j < gameCars.length; j++) {
+          var b = gameCars[j];
+          if (!b.alive || b.isFinished) continue;
+          
+          // Rectangle collision detection
+          var aLeft = a.x - CAR_WIDTH/2;
+          var aRight = a.x + CAR_WIDTH/2;
+          var aTop = a.y - CAR_HEIGHT/2;
+          var aBottom = a.y + CAR_HEIGHT/2;
+          
+          var bLeft = b.x - CAR_WIDTH/2;
+          var bRight = b.x + CAR_WIDTH/2;
+          var bTop = b.y - CAR_HEIGHT/2;
+          var bBottom = b.y + CAR_HEIGHT/2;
+          
+          // Check for overlap
+          if (aRight > bLeft && aLeft < bRight && aBottom > bTop && aTop < bBottom) {
+            // Calculate collision normal (simplified - use vector between centers)
+            var dx = b.x - a.x;
+            var dy = b.y - a.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist === 0) {
+              dx = 1; dy = 0; dist = 1;
+            }
             var nx = dx / dist;
             var ny = dy / dist;
-            a.x -= nx * overlap;
-            a.y -= ny * overlap;
-            b.x += nx * overlap;
-            b.y += ny * overlap;
+            
+            // Separate cars
+            var overlap = Math.min(CAR_WIDTH, CAR_HEIGHT) * 0.3;
+            a.x -= nx * overlap * 0.5;
+            a.y -= ny * overlap * 0.5;
+            b.x += nx * overlap * 0.5;
+            b.y += ny * overlap * 0.5;
+            
+            // Elastic collision
             var relVel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
             if (relVel > 0) continue;
-            var impulse = -(1.0 + 0.8) * relVel * 0.5;
+            var impulse = -(1.0 + 0.6) * relVel * 0.5;
             var ix = impulse * nx;
             var iy = impulse * ny;
             a.vx -= ix;
             a.vy -= iy;
             b.vx += ix;
             b.vy += iy;
+            
+            // Add spin from collision
+            a.spinVelocity += (Math.random() - 0.5) * 2;
+            b.spinVelocity += (Math.random() - 0.5) * 2;
+            
+            playTone(300, 0.05, 0.1);
           }
         }
       }
@@ -518,14 +660,15 @@
       cfg = makeLevel(msg.level);
       gameTime = 0;
       lastTime = 0;
+      buildTrackLengths();  // Initialize track
 
-      var initialMarbles = [];
-      if (msg.marbles && msg.marbles.length) {
-        initialMarbles = msg.marbles.slice();
+      var initialCars = [];
+      if (msg.cars && msg.cars.length) {
+        initialCars = msg.cars.slice();
       } else {
         for (var i = 0; i < 12; i++) {
           if (slots[i].peerId !== null && slots[i].ready) {
-            initialMarbles.push({
+            initialCars.push({
               peerId: slots[i].peerId,
               color: SLOT_COLORS[i].hex,
               slotIndex: i,
@@ -536,26 +679,26 @@
       }
 
       if (isHost) {
-        var humanCount = initialMarbles.filter(function(m) { return !m.isAI; }).length;
-        var aiCount = Math.max(0, AI_MARBLES - humanCount);
+        var humanCount = initialCars.filter(function(c) { return !c.isAI; }).length;
+        var aiCount = Math.max(0, AI_COUNT - humanCount);
         for (var j = 0; j < aiCount; j++) {
-          initialMarbles.push({
+          initialCars.push({
             peerId: 'AI-' + j + '-' + Date.now(),
-            color: '#999',
+            color: '#666',
             slotIndex: 11 - j,
             isAI: true
           });
         }
       }
 
-      setupGameMarbles(initialMarbles);
+      setupGameCars(initialCars);
 
       if (isHost) {
         broadcast({
           type: 'game-start',
           level: msg.level,
           hostPeerId: myPeerId,
-          marbles: initialMarbles
+          cars: initialCars
         });
       }
       playTone(440, 0.1, 0.2);
@@ -563,19 +706,15 @@
 
     function checkGameOver() {
       if (lobbyState !== 'game') return;
-      var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
-      console.log('checkGameOver: alive=', aliveMarbles.length, 'total=', gameMarbles.length, 'lobbyState=', lobbyState);
-      if (aliveMarbles.length <= 1) {
+      var finishedCars = gameCars.filter(function(c) { return c.isFinished; });
+      console.log('checkGameOver: finished=', finishedCars.length, 'total=', gameCars.length, 'lobbyState=', lobbyState);
+      if (finishedCars.length >= 1) {
         lobbyState = 'gameover';
         gameOverTime = performance.now() / 1000;
-        if (aliveMarbles.length === 1) {
-          playTone(880, 0.2, 0.3);
-          setTimeout(function() { playTone(1047, 0.2, 0.3); }, 150);
-        } else {
-          playTone(200, 0.2, 0.2);
-        }
-        var winnerPeerId = aliveMarbles.length === 1 ? aliveMarbles[0].peerId : null;
-        broadcast({ type: 'gameover', winnerPeerId: winnerPeerId });
+        var winner = finishedCars[0];  // First car to finish wins
+        playTone(880, 0.2, 0.3);
+        setTimeout(function() { playTone(1047, 0.2, 0.3); }, 150);
+        broadcast({ type: 'gameover', winnerPeerId: winner.peerId });
       }
     }
 
@@ -590,7 +729,7 @@
       ctx.fillStyle = '#0ff';
       ctx.font = 'bold ' + Math.max(32, Math.min(60, GW / 32)) + 'px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('MARBLE SADNESS', GW / 2, Math.max(60, GH * 0.07));
+      ctx.fillText('CAR CAR', GW / 2, Math.max(60, GH * 0.07));
       
       // Level chooser
       ctx.font = 'bold ' + Math.max(18, Math.min(32, GW / 60)) + 'px monospace';
@@ -673,7 +812,7 @@
       ctx.font = Math.max(12, Math.min(18, GW / 70)) + 'px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('Hold W for left player, UP arrow for right player', GW / 2, GH - 60);
-      ctx.fillText('Then use WASD / arrow keys in game', GW / 2, GH - 36);
+      ctx.fillText('Use A/D + Left/Right arrows to steer, W/Up to accelerate', GW / 2, GH - 36);
       
       // Countdown display
       if (lobbyState === 'countdown') {
@@ -684,23 +823,68 @@
     }
 
     function renderGame() {
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = '#0a4a0a';  // Dark green background
       ctx.fillRect(0, 0, GW, GH);
       
-      // Draw table
-      ctx.fillStyle = '#4a4a2a';
-      ctx.beginPath();
-      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, TABLE_RADIUS, 0, Math.PI * 2);
-      ctx.fill();
+      // Draw track
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(TABLE_CENTER_X, TABLE_CENTER_Y, TABLE_RADIUS, 0, Math.PI * 2);
+      for (var i = 0; i < trackPoints.length; i++) {
+        var p = trackPoints[i];
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
       ctx.stroke();
       
-      // Draw marbles
-      for (var i = 0; i < gameMarbles.length; i++) {
-        gameMarbles[i].render();
+      // Draw track surface
+      ctx.fillStyle = '#2a2a2a';  // Dark gray road
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = TRACK_WIDTH;
+      ctx.beginPath();
+      for (var i = 0; i < trackPoints.length; i++) {
+        var p = trackPoints[i];
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      
+      // Draw center line
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 10]);
+      ctx.beginPath();
+      for (var i = 0; i < trackPoints.length; i++) {
+        var p = trackPoints[i];
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      
+      // Draw finish line
+      var start = trackPoints[0];
+      var next = trackPoints[1];
+      var dx = next.x - start.x;
+      var dy = next.y - start.y;
+      var dist = Math.hypot(dx, dy);
+      var nx = -dy / dist * 20;
+      var ny = dx / dist * 20;
+      
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(start.x + nx, start.y + ny);
+      ctx.lineTo(start.x - nx, start.y - ny);
+      ctx.stroke();
+      
+      // Draw cars
+      for (var i = 0; i < gameCars.length; i++) {
+        gameCars[i].render();
       }
       
       // HUD
@@ -709,16 +893,24 @@
       ctx.textAlign = 'left';
       ctx.fillText('Time: ' + gameTime.toFixed(1) + 's', 20, 40);
       
-      var aliveCount = gameMarbles.filter(function(m) { return m.alive; }).length;
-      ctx.fillText('Marbles left: ' + aliveCount, 20, 70);
+      // Show lap counters for each car
+      var y = 70;
+      for (var i = 0; i < gameCars.length; i++) {
+        var car = gameCars[i];
+        if (!car.isAI && car.alive) {
+          var name = SLOT_COLORS[car.slotIndex].name;
+          ctx.fillText(name + ': Lap ' + (car.lapsCompleted + 1) + '/' + LAPS_TO_WIN, 20, y);
+          y += 30;
+        }
+      }
     }
 
     function renderGameOver() {
       ctx.fillStyle = 'rgba(0,0,0,0.7)';
       ctx.fillRect(0, 0, GW, GH);
       
-      var aliveMarbles = gameMarbles.filter(function(m) { return m.alive; });
-      var winner = aliveMarbles.length === 1 ? aliveMarbles[0] : null;
+      var finishedCars = gameCars.filter(function(c) { return c.isFinished; });
+      var winner = finishedCars.length >= 1 ? finishedCars[0] : null;
       
       ctx.fillStyle = '#0ff';
       ctx.font = 'bold 80px monospace';
@@ -726,10 +918,10 @@
       if (winner) {
         ctx.fillText('WINNER!', GW / 2, GH / 2 - 50);
         ctx.fillStyle = winner.color;
-        var winnerName = winner.isAI ? 'ROBOT BALL' : SLOT_COLORS[winner.slotIndex].name + ' Marble';
+        var winnerName = winner.isAI ? 'AI CAR' : SLOT_COLORS[winner.slotIndex].name + ' Car';
         ctx.fillText(winnerName, GW / 2, GH / 2 + 50);
       } else {
-        ctx.fillText('TIE!', GW / 2, GH / 2);
+        ctx.fillText('RACE INCOMPLETE', GW / 2, GH / 2);
       }
       
       ctx.fillStyle = '#888';
@@ -987,18 +1179,20 @@
       }
       else if (msg.type === 'state') {
         if (!isHost) {
-          // Update marbles from host state
-          if (msg.marbles) {
-            for (var i = 0; i < msg.marbles.length; i++) {
-              var ms = msg.marbles[i];
-              for (var j = 0; j < gameMarbles.length; j++) {
-                var m = gameMarbles[j];
-                if (m.peerId === ms.peerId) {
-                  m.x = ms.x;
-                  m.y = ms.y;
-                  m.vx = ms.vx;
-                  m.vy = ms.vy;
-                  m.alive = ms.alive;
+          // Update cars from host state
+          if (msg.cars) {
+            for (var i = 0; i < msg.cars.length; i++) {
+              var cs = msg.cars[i];
+              for (var j = 0; j < gameCars.length; j++) {
+                var c = gameCars[j];
+                if (c.peerId === cs.peerId) {
+                  c.x = cs.x;
+                  c.y = cs.y;
+                  c.angle = cs.angle;
+                  c.velocity = cs.velocity;
+                  c.trackPosition = cs.trackPosition;
+                  c.lapsCompleted = cs.lapsCompleted;
+                  c.alive = cs.alive;
                   break;
                 }
               }
@@ -1169,28 +1363,37 @@
       } else if (lobbyState === 'game') {
         gameTime += dt;
 
-        for (var i = 0; i < gameMarbles.length; i++) {
-          var marble = gameMarbles[i];
-          if (marble.isAI) {
-            updateAI(marble, dt);
+        for (var i = 0; i < gameCars.length; i++) {
+          var car = gameCars[i];
+          if (car.isAI) {
+            updateAI(car, dt);
           } else {
-            applyPlayerControl(marble, dt);
+            applyPlayerControl(car, dt);
           }
         }
 
         // Physics update
-        for (var i = 0; i < gameMarbles.length; i++) {
-          gameMarbles[i].update(dt, cfg);
+        for (var i = 0; i < gameCars.length; i++) {
+          gameCars[i].update(dt, cfg);
         }
 
-        resolveMarbleCollisions();
+        resolveCarCollisions();
 
         // Host broadcasts state occasionally
         if (isHost && Math.random() < 0.05) {
-          var marbleStates = gameMarbles.map(function(m) {
-            return { peerId: m.peerId, x: m.x, y: m.y, vx: m.vx, vy: m.vy, alive: m.alive };
+          var carStates = gameCars.map(function(c) {
+            return { 
+              peerId: c.peerId, 
+              x: c.x, 
+              y: c.y, 
+              angle: c.angle, 
+              velocity: c.velocity, 
+              trackPosition: c.trackPosition, 
+              lapsCompleted: c.lapsCompleted, 
+              alive: c.alive 
+            };
           });
-          broadcast({ type: 'state', marbles: marbleStates, gameTime: gameTime });
+          broadcast({ type: 'state', cars: carStates, gameTime: gameTime });
         }
 
         checkGameOver();
@@ -1210,7 +1413,7 @@
     function init() {
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      console.log('Marble Sadness initialized');
+      console.log('Car Car initialized');
       connectSignaling();
       requestAnimationFrame(gameLoop);
     }
